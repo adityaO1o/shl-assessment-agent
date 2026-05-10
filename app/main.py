@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
-from threading import Lock
 from typing import Any, List
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -13,8 +11,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.recommender import SHLRecommender
+from app.retriever import SHLRetriever
 
 logger = logging.getLogger(__name__)
+
+
+retriever_instance = None
+recommender_instance = None
 
 
 class ChatMessage(BaseModel):
@@ -63,26 +66,32 @@ class HealthResponse(BaseModel):
 	status: str = "ok"
 
 
-_recommender_lock = Lock()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-	"""Initialize application state while keeping startup failures contained."""
-	app.state.recommender = None
-	try:
-		logger.info("SHL FastAPI application starting up")
-		yield
-	finally:
-		logger.info("SHL FastAPI application shutting down")
-
-
 app = FastAPI(
 	title="SHL Conversational Recommendation API",
 	version="1.0.0",
 	description="Grounded, catalog-only SHL assessment recommendations.",
-	lifespan=lifespan,
 )
+
+
+@app.on_event("startup")
+async def preload_ai_components() -> None:
+	"""Load heavyweight AI dependencies once during application startup."""
+	global retriever_instance, recommender_instance
+
+	logger.warning("SHL FastAPI application starting up")
+	try:
+		print("Loading embedding model...", flush=True)
+		retriever_instance = SHLRetriever(auto_initialize=False)
+		retriever_instance._load_dependencies()
+		print("Building/loading FAISS index...", flush=True)
+		retriever_instance.build_index()
+		recommender_instance = SHLRecommender(retriever=retriever_instance)
+		app.state.retriever = retriever_instance
+		app.state.recommender = recommender_instance
+		print("Recommender initialized successfully", flush=True)
+	except Exception:
+		logger.exception("Application startup failed while preloading AI components")
+		raise
 
 
 @app.exception_handler(RequestValidationError)
@@ -112,30 +121,14 @@ async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONRespons
 	)
 
 
-def _build_recommender() -> SHLRecommender:
-	"""Create the recommender once and reuse it for all requests."""
-	return SHLRecommender()
-
-
 def get_recommender(request: Request) -> SHLRecommender:
-	"""Resolve a shared recommender instance with thread-safe lazy init."""
-	recommender = getattr(request.app.state, "recommender", None)
-	if recommender is not None:
-		return recommender
-
-	with _recommender_lock:
-		recommender = getattr(request.app.state, "recommender", None)
-		if recommender is None:
-			logger.info("Initializing SHLRecommender instance")
-			try:
-				recommender = _build_recommender()
-			except Exception as exc:
-				logger.exception("Failed to initialize recommender: %s", exc)
-				raise HTTPException(
-					status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-					detail="Recommendation service is temporarily unavailable",
-				) from exc
-			request.app.state.recommender = recommender
+	"""Resolve the preloaded shared recommender instance."""
+	recommender = getattr(request.app.state, "recommender", None) or recommender_instance
+	if recommender is None:
+		raise HTTPException(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			detail="Recommendation service is temporarily unavailable",
+		)
 	return recommender
 
 

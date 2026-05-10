@@ -38,6 +38,7 @@ class SHLRetriever:
         self,
         model_name: str = "all-MiniLM-L6-v2",
         catalog_path: Optional[str] = None,
+        auto_initialize: bool = True,
     ) -> None:
         """Initialize the retriever.
 
@@ -53,8 +54,10 @@ class SHLRetriever:
         self.index: Optional[Any] = None
         self.emb_dim: Optional[int] = None
         self.items: List[CatalogItem] = []
+        self._dependencies_attempted = False
         logger.info("Initialized SHLRetriever with model=%s", model_name)
-        self._initialize()
+        if auto_initialize:
+            self._initialize()
 
     def _load_dependencies(self) -> None:
         """Load optional heavy dependencies lazily.
@@ -66,6 +69,7 @@ class SHLRetriever:
         # Load the sentence-transformers model lazily. It may still work even if
         # NumPy/FAISS are unavailable; some environments only need the model for
         # embedding-based fallbacks.
+        self._dependencies_attempted = True
         if self.model is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -158,10 +162,9 @@ class SHLRetriever:
         This method populates `self.items`, `self.index`, and `self.emb_dim`.
         It is safe to call multiple times to rebuild the index.
         """
-        # Load heavy deps if possible; fallbacks are available when not.
-        self._load_dependencies()
+        if not self._dependencies_attempted:
+            self._load_dependencies()
 
-        # Load catalog items
         if self.catalog_path:
             items = load_catalog(self.catalog_path)
         else:
@@ -172,14 +175,17 @@ class SHLRetriever:
         if not items:
             raise ValueError("Catalog is empty; cannot build retriever index")
 
-        # Extract searchable texts preserving order
+        if self.model is None:
+            self._use_fallback_search = True
+            self._fallback_texts = [((getattr(it, "searchable_text", "") or "").lower(), idx) for idx, it in enumerate(self.items)]
+            logger.info("Built fallback in-memory search over %d items", len(self._fallback_texts))
+            return
+
         texts = [getattr(it, "searchable_text", "") or "" for it in items]
         embs = self._embed_texts(texts)
 
-        # If FAISS is available and embeddings are numpy arrays, build index.
         if getattr(self, "_use_fallback_search", False) is not True and self.faiss is not None:
             try:
-                # embs should be a numpy.ndarray here
                 n, d = embs.shape
                 self.emb_dim = d
                 logger.info("Created embeddings for %d catalog items", n)
@@ -191,7 +197,6 @@ class SHLRetriever:
                 logger.warning("FAISS index build failed; switching to fallback search: %s", exc)
                 setattr(self, "_use_fallback_search", True)
 
-        # Build a lightweight fallback mapping (lowercased searchable texts)
         self._use_fallback_search = True
         self._fallback_texts = [((getattr(it, "searchable_text", "") or "").lower(), idx) for idx, it in enumerate(self.items)]
         logger.info("Built fallback in-memory search over %d items", len(self._fallback_texts))
@@ -223,9 +228,6 @@ class SHLRetriever:
             logger.warning("Attempted search before retriever was ready")
             return []
 
-        # If using fallback search (no FAISS/NumPy), perform a simple token-overlap
-        # scoring between the query and each item's searchable_text. This keeps
-        # recommendations grounded in the catalog without requiring compiled deps.
         if getattr(self, "_use_fallback_search", False):
             q_tokens = set((query or "").lower().split())
             scored = []
@@ -245,9 +247,7 @@ class SHLRetriever:
                 results.append((self.items[idx], score))
             return results
 
-        # Embed and normalize query for FAISS-based search
         q_emb = self._embed_texts([query])
-        # q_emb may be a Python list fallback if embeddings couldn't use NumPy
         try:
             if hasattr(q_emb, "size") and q_emb.size == 0:
                 return []
@@ -255,9 +255,8 @@ class SHLRetriever:
             if not q_emb:
                 return []
 
-        # FAISS expects shape (n_queries, dim)
         scores, idxs = self.index.search(q_emb, top_k)
-        scores = scores[0]  # shape (top_k,)
+        scores = scores[0]
         idxs = idxs[0]
 
         results: List[Tuple[CatalogItem, float]] = []
