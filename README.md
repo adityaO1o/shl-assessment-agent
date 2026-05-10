@@ -234,4 +234,4 @@ Notes:
 
 ## License & Contact
 
-This repository contains example code for SHL-style assessment recommendations. For questions about integration or evaluation, contact the engineering owner or open an issue in the repository.
+This repository contains example code for SHL-style assessment recommendations. For questions about integration or evaluation, contact me ( aditya2562sharma@gmail.com)
