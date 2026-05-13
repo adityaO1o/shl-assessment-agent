@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, List, Tuple, Optional
-
+import numpy as np
 from app.catalog_loader import CatalogItem, load_catalog
 
 logger = logging.getLogger(__name__)
