@@ -72,27 +72,33 @@ app = FastAPI(
 	description="Grounded, catalog-only SHL assessment recommendations.",
 )
 
+def get_recommender(request: Request) -> SHLRecommender:
+    """Lazy-load recommender only when first request arrives."""
 
-@app.on_event("startup")
-async def preload_ai_components() -> None:
-	"""Load heavyweight AI dependencies once during application startup."""
-	global retriever_instance, recommender_instance
+    global recommender_instance, retriever_instance
 
-	logger.warning("SHL FastAPI application starting up")
-	try:
-		print("Loading embedding model...", flush=True)
-		retriever_instance = SHLRetriever(auto_initialize=False)
-		retriever_instance._load_dependencies()
-		print("Building/loading FAISS index...", flush=True)
-		retriever_instance.build_index()
-		recommender_instance = SHLRecommender(retriever=retriever_instance)
-		app.state.retriever = retriever_instance
-		app.state.recommender = recommender_instance
-		print("Recommender initialized successfully", flush=True)
-	except Exception:
-		logger.exception("Application startup failed while preloading AI components")
-		raise
+    if recommender_instance is None:
 
+        logger.warning("Loading AI components lazily...")
+
+        retriever_instance = SHLRetriever(
+            auto_initialize=False
+        )
+
+        retriever_instance._load_dependencies()
+
+        retriever_instance.build_index()
+
+        recommender_instance = SHLRecommender(
+            retriever=retriever_instance
+        )
+
+        app.state.recommender = recommender_instance
+        app.state.retriever = retriever_instance
+
+        logger.warning("AI components loaded successfully")
+
+    return recommender_instance
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
